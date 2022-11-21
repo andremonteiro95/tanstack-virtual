@@ -457,14 +457,10 @@ export class Virtualizer<
         let start: number
         let end: number
         if (reverse) {
-          end = measurements[i - 1]
-            ? measurements[i - 1]!.start
-            : paddingEnd
+          end = measurements[i - 1]?.start ?? paddingEnd
           start = end - size
         } else {
-          start = measurements[i - 1]
-            ? measurements[i - 1]!.end
-            : paddingStart
+          start = measurements[i - 1]?.end ?? paddingStart
           end = start + size
         }
 
@@ -582,7 +578,7 @@ export class Virtualizer<
       this.isScrolling &&
       this.destinationOffset === undefined
     ) {
-      if (this.options.reverse) {
+      if (this.options.reverse && item.end > this.scrollOffset) {
         if (process.env.NODE_ENV !== 'production' && this.options.debug) {
           console.info('correction', delta)
         }
@@ -593,7 +589,7 @@ export class Virtualizer<
           sync: false,
           requested: false,
         })
-      } else if (item.start < this.scrollOffset) {
+      } else if (!this.options.reverse && item.start < this.scrollOffset) {
         if (process.env.NODE_ENV !== 'production' && this.options.debug) {
           console.info('correction', delta)
         }
@@ -697,12 +693,8 @@ export class Virtualizer<
     }
 
     const totalSize = this.getTotalSize()
-    const start = this.options.reverse
-      ? totalSize + measurement.start
-      : measurement.start
-    const end = this.options.reverse
-      ? totalSize + measurement.end
-      : measurement.end
+    const start = measurement.start + (this.options.reverse ? totalSize : 0)
+    const end = measurement.end + (this.options.reverse ? totalSize : 0)
 
     if (align === 'auto') {
       if (end >= offset + size - this.options.scrollPaddingEnd) {
@@ -815,15 +807,15 @@ function calculateRange({
 }): { startIndex: number, endIndex: number } {
   const count = measurements.length - 1
 
-  if (!reverse) {
-    const getOffset = (index: number) => measurements[index]!.start
+  if (reverse) {
+    const getOffset = (index: number) => measurements[index]!.end * -1
 
-    const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset)
+    const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset * -1)
     let endIndex = startIndex
-
+    
     while (
       endIndex < count &&
-      measurements[endIndex]!.end < scrollOffset + outerSize
+      measurements[endIndex]!.start * -1 < scrollOffset * -1 + outerSize
     ) {
       endIndex++
     }
@@ -831,14 +823,14 @@ function calculateRange({
     return { startIndex, endIndex }
   }
 
-  const getOffset = (index: number) => measurements[index]!.end * -1
+  const getOffset = (index: number) => measurements[index]!.start
 
-  const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset * -1)
+  const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset)
   let endIndex = startIndex
-  
+
   while (
     endIndex < count &&
-    measurements[endIndex]!.start * -1 < scrollOffset * -1 + outerSize
+    measurements[endIndex]!.end < scrollOffset + outerSize
   ) {
     endIndex++
   }

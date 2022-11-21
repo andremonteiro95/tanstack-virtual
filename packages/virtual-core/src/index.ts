@@ -146,8 +146,11 @@ const createOffsetObserver = (mode: ObserverMode) => {
     const scroll = () => {
       const offset =
         instance.scrollElement[instance.options.horizontal ? propX : propY]
-
-      cb(Math.max(0, offset - instance.options.scrollMargin))
+      cb(
+        instance.options.reverse
+          ? Math.min(0, offset + instance.options.scrollMargin)
+          : Math.max(0, offset - instance.options.scrollMargin),
+      )
     }
 
     scroll()
@@ -157,7 +160,18 @@ const createOffsetObserver = (mode: ObserverMode) => {
       const scrollX = target[propX]
       const scrollY = target[propY]
 
-      if (instance.options.horizontal ? prevX - scrollX : prevY - scrollY) {
+      let shouldScroll
+      if (instance.options.horizontal) {
+        shouldScroll = instance.options.reverse
+          ? scrollX - prevX
+          : prevX - scrollX
+      } else {
+        shouldScroll = instance.options.reverse
+          ? scrollY - prevY
+          : prevY - scrollY
+      }
+
+      if (shouldScroll) {
         scroll()
       }
 
@@ -261,6 +275,7 @@ export interface VirtualizerOptions<
   scrollMargin?: number
   scrollingDelay?: number
   indexAttribute?: string
+  reverse?: boolean
 }
 
 export class Virtualizer<
@@ -334,6 +349,7 @@ export class Virtualizer<
       scrollMargin: 0,
       scrollingDelay: 150,
       indexAttribute: 'data-index',
+      reverse: false,
       ...opts,
     }
   }
@@ -416,10 +432,12 @@ export class Virtualizer<
     () => [
       this.options.count,
       this.options.paddingStart,
+      this.options.paddingEnd,
       this.options.getItemKey,
+      this.options.reverse,
       this.itemMeasurementsCache,
     ],
-    (count, paddingStart, getItemKey, measurementsCache) => {
+    (count, paddingStart, paddingEnd, getItemKey, reverse, measurementsCache) => {
       const min =
         this.pendingMeasuredCacheIndexes.length > 0
           ? Math.min(...this.pendingMeasuredCacheIndexes)
@@ -431,14 +449,25 @@ export class Virtualizer<
       for (let i = min; i < count; i++) {
         const key = getItemKey(i)
         const measuredSize = measurementsCache[key]
-        const start = measurements[i - 1]
-          ? measurements[i - 1]!.end
-          : paddingStart
         const size =
           typeof measuredSize === 'number'
             ? measuredSize
             : this.options.estimateSize(i)
-        const end = start + size
+
+        let start: number
+        let end: number
+        if (reverse) {
+          end = measurements[i - 1]
+            ? measurements[i - 1]!.start
+            : paddingEnd
+          start = end - size
+        } else {
+          start = measurements[i - 1]
+            ? measurements[i - 1]!.end
+            : paddingStart
+          end = start + size
+        }
+
         measurements[i] = { index: i, start, size, end, key }
       }
 
@@ -452,12 +481,18 @@ export class Virtualizer<
   )
 
   calculateRange = memo(
-    () => [this.getMeasurements(), this.getSize(), this.scrollOffset],
-    (measurements, outerSize, scrollOffset) => {
+    () => [
+      this.getMeasurements(),
+      this.getSize(),
+      this.scrollOffset,
+      this.options.reverse,
+    ],
+    (measurements, outerSize, scrollOffset, reverse) => {
       const range = calculateRange({
         measurements,
         outerSize,
         scrollOffset,
+        reverse,
       })
       if (
         range.startIndex !== this.range.startIndex ||
@@ -542,12 +577,23 @@ export class Virtualizer<
 
     const delta = measuredItemSize - itemSize
 
-    if (delta !== 0) {
-      if (
-        item.start < this.scrollOffset &&
-        this.isScrolling &&
-        this.destinationOffset === undefined
-      ) {
+    if (
+      delta !== 0  &&
+      this.isScrolling &&
+      this.destinationOffset === undefined
+    ) {
+      if (this.options.reverse) {
+        if (process.env.NODE_ENV !== 'production' && this.options.debug) {
+          console.info('correction', delta)
+        }
+        this.scrollDelta -= delta
+
+        this._scrollToOffset(this.scrollOffset + this.scrollDelta, {
+          canSmooth: false,
+          sync: false,
+          requested: false,
+        })
+      } else if (item.start < this.scrollOffset) {
         if (process.env.NODE_ENV !== 'production' && this.options.debug) {
           console.info('correction', delta)
         }
@@ -650,13 +696,18 @@ export class Virtualizer<
       return
     }
 
+    const totalSize = this.getTotalSize()
+    const start = this.options.reverse
+      ? totalSize + measurement.start
+      : measurement.start
+    const end = this.options.reverse
+      ? totalSize + measurement.end
+      : measurement.end
+
     if (align === 'auto') {
-      if (measurement.end >= offset + size - this.options.scrollPaddingEnd) {
+      if (end >= offset + size - this.options.scrollPaddingEnd) {
         align = 'end'
-      } else if (
-        measurement.start <=
-        offset + this.options.scrollPaddingStart
-      ) {
+      } else if (start <= offset + this.options.scrollPaddingStart) {
         align = 'start'
       } else {
         return
@@ -665,15 +716,23 @@ export class Virtualizer<
 
     const toOffset =
       align === 'end'
-        ? measurement.end + this.options.scrollPaddingEnd
-        : measurement.start - this.options.scrollPaddingStart
+        ? end + this.options.scrollPaddingEnd
+        : start - this.options.scrollPaddingStart
 
     this.scrollToOffset(toOffset, { align, smoothScroll, ...rest })
   }
 
-  getTotalSize = () =>
-    (this.getMeasurements()[this.options.count - 1]?.end ||
-      this.options.paddingStart) + this.options.paddingEnd
+  getTotalSize = () => {
+    const measurements = this.getMeasurements()[this.options.count - 1]
+
+    if (this.options.reverse) {
+      return (
+        ((measurements?.start || 0) * -1) || this.options.paddingEnd
+      ) + this.options.paddingStart
+    }
+
+    return (measurements?.end || this.options.paddingStart) + this.options.paddingEnd
+  }
 
   private _scrollToOffset = (
     offset: number,
@@ -747,20 +806,39 @@ function calculateRange({
   measurements,
   outerSize,
   scrollOffset,
+  reverse,
 }: {
   measurements: VirtualItem[]
   outerSize: number
   scrollOffset: number
-}) {
+  reverse: boolean
+}): { startIndex: number, endIndex: number } {
   const count = measurements.length - 1
-  const getOffset = (index: number) => measurements[index]!.start
 
-  const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset)
+  if (!reverse) {
+    const getOffset = (index: number) => measurements[index]!.start
+
+    const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset)
+    let endIndex = startIndex
+
+    while (
+      endIndex < count &&
+      measurements[endIndex]!.end < scrollOffset + outerSize
+    ) {
+      endIndex++
+    }
+
+    return { startIndex, endIndex }
+  }
+
+  const getOffset = (index: number) => measurements[index]!.end * -1
+
+  const startIndex = findNearestBinarySearch(0, count, getOffset, scrollOffset * -1)
   let endIndex = startIndex
-
+  
   while (
     endIndex < count &&
-    measurements[endIndex]!.end < scrollOffset + outerSize
+    measurements[endIndex]!.start * -1 < scrollOffset * -1 + outerSize
   ) {
     endIndex++
   }
